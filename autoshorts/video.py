@@ -1,8 +1,8 @@
-"""Stock-free educational motion cards with offline speech and burned-in captions."""
+"""Frame-rendered moving graphics with natural speech and approximate captions."""
 import math
 import os
 from pathlib import Path
-import shutil
+import subprocess
 from PIL import Image, ImageDraw, ImageFont
 
 
@@ -67,17 +67,42 @@ def background(scene, index, total, destination):
     img.save(destination)
 
 
+def motion_frame(base, index, seconds, length):
+    image = base.copy()
+    draw = ImageDraw.Draw(image)
+    accent = [(100,231,211),(188,159,255),(106,205,255)][index % 3]
+    # Mask old central decoration. Each frame moves planets and orbit paths.
+    draw.rounded_rectangle((165,180,555,550), radius=45, fill=(10,20,40))
+    cx, cy = 360, 365
+    for j, radius in enumerate((70,115,157)):
+        draw.ellipse((cx-radius,cy-radius,cx+radius,cy+radius),outline=(44,69,96),width=2)
+        angle = seconds * (0.55 + j * .23) * (-1 if j == 1 else 1) + index + j * 2
+        x, y = cx + math.cos(angle)*radius, cy + math.sin(angle)*radius
+        r = 10 + j*3
+        draw.ellipse((x-r,y-r,x+r,y+r),fill=accent)
+    pulse = 29 + 4*math.sin(seconds*2.5)
+    draw.ellipse((cx-pulse,cy-pulse,cx+pulse,cy+pulse),fill=accent)
+    # Moving particle field and a time-based sweep at the bottom.
+    for j in range(22):
+        x = (j*107 + seconds*(12+j%4*7)) % 700 + 10
+        y = (j*89 - seconds*18) % 1200 + 30
+        if 180 < y < 550 or y < 80:
+            draw.ellipse((x,y,x+3,y+3),fill=accent)
+    draw.rounded_rectangle((81,900,639,907),radius=3,fill=(44,63,86))
+    end = 81 + max(1,int(558*min(seconds/length,1)))
+    draw.rectangle((81,900,end,907),fill=accent)
+    return image
+
+
 def render_video(plan, folder):
     from .engine import run, duration, stamp
     language = os.getenv('LANGUAGE', 'en')
-    voice = shutil.which('espeak-ng')
-    if not voice:
-        raise RuntimeError('espeak-ng is missing. Run the workflow media dependency install step.')
+    from .voice import speak
     parts, elapsed = [], 0
     for i, scene in enumerate(plan['scenes']):
         text, audio, image, caption, out = [folder / f'scene-{i}.{suffix}' for suffix in ('txt','wav','png','srt','mp4')]
         text.write_text(scene['narration'], encoding='utf-8')
-        run([voice, '-v', language, '-s', '150', '-f', str(text), '-w', str(audio)], 60)
+        speak(scene['narration'], audio)
         seconds = duration(audio) + 0.4
         elapsed += seconds
         if elapsed > 70:
@@ -91,11 +116,25 @@ def render_video(plan, folder):
         # Names/paths come from application-owned temporary directories, not user input.
         caption_path = str(caption.resolve()).replace('\\', '/').replace(':', '\\:').replace("'", "\\'")
         family = 'Noto Sans Bengali' if language == 'bn' else 'Noto Sans'
-        vf = ("zoompan=z='min(zoom+0.00025,1.06)':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':d=1:s=720x1280:fps=25,"
-              f"subtitles='{caption_path}':force_style='FontName={family},FontSize=21,Outline=2,Alignment=2,MarginV=58'")
-        run(['ffmpeg','-y','-v','error','-loop','1','-framerate','25','-i',str(image),'-i',str(audio),
-             '-t',str(seconds),'-vf',vf,'-af','apad','-map','0:v:0','-map','1:a:0','-c:v','libx264',
-             '-preset','veryfast','-crf','24','-pix_fmt','yuv420p','-threads','2','-c:a','aac','-ar','44100','-ac','2',str(out)])
+        vf = f"subtitles='{caption_path}':force_style='FontName={family},FontSize=21,Outline=2,Alignment=2,MarginV=58'"
+        command = ['ffmpeg','-y','-v','error','-f','rawvideo','-pix_fmt','rgb24','-s','720x1280',
+                   '-r','25','-i','pipe:0','-i',str(audio),'-t',str(seconds),'-vf',vf,
+                   '-af','apad','-map','0:v:0','-map','1:a:0','-c:v','libx264',
+                   '-preset','veryfast','-crf','23','-pix_fmt','yuv420p','-threads','2',
+                   '-c:a','aac','-ar','44100','-ac','2',str(out)]
+        with (folder / f'encoder-{i}.log').open('wb') as log:
+            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log)
+            try:
+                base = Image.open(image).convert('RGB').resize((720,1280))
+                for frame in range(math.ceil(seconds * 25)):
+                    process.stdin.write(motion_frame(base, i, frame / 25, seconds).tobytes())
+                process.stdin.close()
+                if process.wait(timeout=120) != 0:
+                    raise RuntimeError('Motion encoder failed; check encoder logs.')
+            except BaseException:
+                process.kill()
+                process.wait()
+                raise
         parts.append(out)
     concat = folder / 'concat.txt'
     concat.write_text('\n'.join(f"file '{p.resolve()}'" for p in parts))

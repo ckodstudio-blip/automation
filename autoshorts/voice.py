@@ -1,0 +1,37 @@
+"""Natural Gemini speech. No silent fallback to robotic offline speech."""
+import base64
+import os
+import time
+import requests
+
+
+def speak(text, destination):
+    from .engine import gemini_error
+    model = os.getenv('TTS_MODEL', 'gemini-3.8-flash-lite-tts').strip().removeprefix('models/')
+    key = os.environ['GEMINI_API_KEY'].strip()
+    style = ('Natural, warm documentary narration; conversational, clear and engaging. '
+             'Use varied intonation and short pauses, moderate pace. Read the transcript exactly. '
+             + ('Speak Bengali with a natural Bangladeshi accent.' if os.getenv('LANGUAGE') == 'bn' else 'Speak clear English.'))
+    payload = {
+        'model': model,
+        'input': [{'type': 'user_input', 'content': [{'type': 'text', 'text': text,
+                   'annotations': [{'type': 'speech_metadata', 'style': style}]}]}],
+        'response_format': {'type': 'audio'},
+        'generation_config': {'speech_config': [{'voice': os.getenv('TTS_VOICE', 'Kore').strip()}]},
+    }
+    for attempt in range(3):
+        response = requests.post('https://generativelanguage.googleapis.com/v1beta/interactions',
+                                 headers={'x-goog-api-key': key}, json=payload, timeout=150)
+        if response.status_code not in (429, 500, 502, 503, 504) or attempt == 2:
+            break
+        time.sleep(5 * (2 ** attempt))
+    if not response.ok:
+        raise RuntimeError('Natural voice generation failed: ' + gemini_error(response, model))
+    blocks = [block for step in response.json().get('steps', []) if step.get('type') == 'model_output'
+              for block in step.get('content', []) if block.get('type') == 'audio' and block.get('data')]
+    if not blocks:
+        raise RuntimeError('TTS returned no audio. Check TTS model access/quota; no video was uploaded.')
+    audio = base64.b64decode(blocks[-1]['data'], validate=True)
+    if not (audio.startswith(b'RIFF') and audio[8:12] == b'WAVE'):
+        raise RuntimeError('TTS did not return expected WAV audio; stopped before upload.')
+    destination.write_bytes(audio)
