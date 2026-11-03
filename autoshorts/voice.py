@@ -1,6 +1,7 @@
 """Natural Gemini speech. No silent fallback to robotic offline speech."""
 import base64
 import os
+import logging
 import time
 import requests
 
@@ -19,11 +20,24 @@ def speak(text, destination):
         'response_format': {'type': 'audio'},
         'generation_config': {'speech_config': [{'voice': os.getenv('TTS_VOICE', 'Kore').strip()}]},
     }
+    # Bound each call and retry transient transport/server failures.
+    # A timed-out generation may still finish remotely; retries can consume quota.
     for attempt in range(3):
-        response = requests.post('https://generativelanguage.googleapis.com/v1beta/interactions',
-                                 headers={'x-goog-api-key': key}, json=payload, timeout=150)
-        if response.status_code not in (429, 500, 502, 503, 504) or attempt == 2:
-            break
+        logging.info('Generating natural voice: attempt %s/3', attempt + 1)
+        try:
+            response = requests.post(
+                'https://generativelanguage.googleapis.com/v1beta/interactions',
+                headers={'x-goog-api-key': key}, json=payload, timeout=(15, 180))
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            if attempt == 2:
+                raise RuntimeError(
+                    'Natural voice request timed out or connection failed after 3 attempts. '
+                    'Try a new workflow run later; no video was uploaded.') from None
+            logging.warning('Voice connection interrupted (%s); retrying.', type(exc).__name__)
+        else:
+            if response.status_code not in (429, 500, 502, 503, 504) or attempt == 2:
+                break
+            logging.warning('Voice API returned HTTP %s; retrying.', response.status_code)
         time.sleep(5 * (2 ** attempt))
     if not response.ok:
         raise RuntimeError('Natural voice generation failed: ' + gemini_error(response, model))
