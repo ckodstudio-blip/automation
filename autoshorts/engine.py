@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import secrets
 import subprocess
@@ -110,6 +111,44 @@ def validate_plan(p):
         raise ValueError('AI narration too long')
     return metadata(p)
 
+def safe_error_message(message, limit=1500):
+    """Remove configured secrets and common credential forms before saving/logging."""
+    text = str(message)
+    for name in ('GEMINI_API_KEY', 'GOOGLE_CLIENT_SECRET', 'MYSQL_PASSWORD',
+                 'YOUTUBE_REFRESH_TOKEN', 'SECRET_KEY'):
+        secret = os.getenv(name, '')
+        if secret:
+            text = text.replace(secret, '[redacted]')
+            stripped = secret.strip()
+            if stripped:
+                text = text.replace(stripped, '[redacted]')
+    text = re.sub(r'(?i)([?&](?:key|api_key|access_token|refresh_token)=)[^&\s]+', r'\1[redacted]', text)
+    text = re.sub(r'(?i)(Bearer\s+)\S+', r'\1[redacted]', text)
+    text = re.sub(r'AIza[A-Za-z0-9_-]+', '[redacted]', text)
+    return ' '.join(text.split())[:limit]
+
+
+def gemini_error(response, model):
+    """Expose Google's actual error message, without keys, request bodies or headers."""
+    status, message = '', 'Google returned a non-JSON error response.'
+    try:
+        payload = response.json()
+        detail = payload.get('error', {}) if isinstance(payload, dict) else {}
+        if isinstance(detail, dict):
+            status = str(detail.get('status', ''))
+            message = str(detail.get('message', 'Google did not return an error message.'))
+    except (ValueError, TypeError):
+        pass
+    hint = {
+        400: 'Check API key and request/model support.',
+        401: 'Check API authentication.',
+        403: 'Check API/project permissions and key restrictions.',
+        404: 'Check the exact model ID and its availability for v1beta generateContent.',
+        429: 'Quota/rate limit reached; check the project quota. No paid fallback was used.',
+    }.get(response.status_code, 'Check Google API availability and the detailed message.')
+    return safe_error_message(f'Gemini HTTP {response.status_code}; model={model}; status={status}; message={message}; {hint}')
+
+
 def make_plan():
     with db() as c:
         recent = [r['title'] for r in c.execute('SELECT title FROM jobs WHERE title IS NOT NULL ORDER BY created DESC LIMIT 50')]
@@ -125,16 +164,47 @@ Tags must match the video, each max 40 characters, combined max 350 characters. 
 Each scene has narration (one short sentence, max 250 characters), search (simple English animated scene label, max 80 characters), visual_prompt (English shot description, max 600 characters).
 Total narration 60–95 words, with an engaging first sentence and clear ending. No markdown.
 These are abstract educational animations, not footage of a real event. Do not claim they depict a specific actual event.'''
-    model = os.environ['GEMINI_MODEL']
-    if not all(ch.isalnum() or ch in '-._' for ch in model):
-        raise ValueError('GEMINI_MODEL must be a plain model ID')
-    r = requests.post(f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
-        headers={'x-goog-api-key': os.environ['GEMINI_API_KEY']},
-        json={'contents': [{'parts': [{'text': prompt}]}], 'generationConfig': {'responseMimeType': 'application/json'}}, timeout=120)
+    # Accept a pasted model resource name, but call the API with one models/ prefix.
+    model = os.environ['GEMINI_MODEL'].strip()
+    if model.startswith('models/'):
+        model = model[len('models/'):]
+    if not model or not re.fullmatch(r'[A-Za-z0-9._-]+', model):
+        raise ValueError('GEMINI_MODEL must contain a plain model ID, e.g. gemini-2.5-flash')
+    key = os.environ['GEMINI_API_KEY'].strip()
+    if not key or any(ch.isspace() for ch in key):
+        raise ValueError('GEMINI_API_KEY contains whitespace/newlines. Paste only the API key in GitHub Secrets.')
+    try:
+        r = requests.post(
+            f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+            headers={'x-goog-api-key': key},
+            json={'contents': [{'parts': [{'text': prompt}]}],
+                  'generationConfig': {'responseMimeType': 'application/json'}},
+            timeout=120)
+    except requests.Timeout:
+        raise RuntimeError(f'Gemini request timed out; model={model}. No automatic retry was made.') from None
+    except requests.RequestException:
+        raise RuntimeError(f'Gemini network request failed; model={model}. Check service connectivity.') from None
     if not r.ok:
-        raise RuntimeError(f'Gemini returned HTTP {r.status_code}; check model, quota and key')
-    value = r.json()
-    return validate_plan(json.loads(''.join(x.get('text', '') for x in value['candidates'][0]['content']['parts'])))
+        raise RuntimeError(gemini_error(r, model))
+    try:
+        value = r.json()
+    except ValueError:
+        raise RuntimeError(f'Gemini HTTP {r.status_code}; model={model}; response was not valid JSON.') from None
+    candidates = value.get('candidates', []) if isinstance(value, dict) else []
+    if not candidates:
+        reason = value.get('promptFeedback', {}).get('blockReason', 'No candidate returned') if isinstance(value, dict) else 'Invalid response shape'
+        raise RuntimeError(safe_error_message(f'Gemini returned no content; model={model}; reason={reason}'))
+    candidate = candidates[0]
+    parts = candidate.get('content', {}).get('parts', [])
+    content = ''.join(part.get('text', '') for part in parts if not part.get('thought'))
+    if not content.strip():
+        raise RuntimeError(safe_error_message(f"Gemini returned empty text; model={model}; finishReason={candidate.get('finishReason', 'unknown')}"))
+    try:
+        plan = json.loads(content)
+    except (ValueError, TypeError):
+        raise RuntimeError(safe_error_message(f"Gemini returned invalid script JSON; model={model}; finishReason={candidate.get('finishReason', 'unknown')}")) from None
+    return validate_plan(plan)
+
 
 def run(args, timeout=600):
     result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
@@ -190,14 +260,10 @@ def pipeline(job):
         # A confirmed YouTube upload is the canonical video copy.
         video.unlink(missing_ok=True)
     except Exception as exc:
-        # Never log credential-bearing HTTP responses or exception URLs.
-        msg = str(exc)
-        for key in ('GEMINI_API_KEY', 'GOOGLE_CLIENT_SECRET', 'MYSQL_PASSWORD', 'YOUTUBE_REFRESH_TOKEN'):
-            value = os.getenv(key)
-            if value:
-                msg = msg.replace(value, '[redacted]')
-        update(job, state='needs_check' if uploading else 'failed', error=msg[:1600])
-        logging.warning('Job %s failed (%s)', job, type(exc).__name__)
+        # Print the sanitized reason in Actions as well as storing it in Aiven.
+        msg = safe_error_message(exc)
+        update(job, state='needs_check' if uploading else 'failed', error=msg)
+        logging.warning('Job %s failed (%s): %s', job, type(exc).__name__, msg)
     finally:
         # Delete intermediate media even when a job fails; keep plan and final output.
         folder = DATA / job
