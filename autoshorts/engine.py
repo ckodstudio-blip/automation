@@ -107,6 +107,10 @@ def validate_plan(p):
         for k, maximum in [('narration', 250), ('search', 80), ('visual_prompt', 600)]:
             if not isinstance(s.get(k), str) or not 1 <= len(s[k]) <= maximum:
                 raise ValueError('Invalid scene ' + k)
+    for s in p['scenes']:
+        for field, choices in [('speaker', ('mira', 'rafi')), ('action', ('talk', 'wave', 'point', 'walk', 'celebrate')), ('background', ('park', 'space', 'lab'))]:
+            if s.get(field) not in choices:
+                raise ValueError('Invalid cartoon scene ' + field)
     if sum(len(s['narration'].split()) for s in p['scenes']) > 115:
         raise ValueError('AI narration too long')
     return metadata(p)
@@ -153,17 +157,17 @@ def make_plan():
     with db() as c:
         recent = [r['title'] for r in c.execute('SELECT title FROM jobs WHERE title IS NOT NULL ORDER BY created DESC LIMIT 50')]
     language = 'Bengali' if os.getenv('LANGUAGE', 'en') == 'bn' else 'English'
-    prompt = f'''Create one original 30–55 second educational YouTube Short in {language}.
+    prompt = f'''Create one original 30–55 second animated cartoon story for a YouTube Short in {language}.
 Niche: {os.getenv('NICHE', 'Nature and space facts')}.
 Avoid these previous titles/topics: {json.dumps(recent)}.
-Choose a fresh specific topic. Use reliable timeless facts, no fabricated claims, no medical/financial advice.
+Create a simple fictional adventure with a beginning, a small problem and a satisfying resolution, inspired by the niche. Use two original cartoon friends named Mira and Rafi. Never use copyrighted franchise characters. Avoid medical/financial advice. Any educational facts must be accurate; clearly distinguish fantasy from fact.
 Return ONLY a JSON object with title (max 90 characters), description (max 1500 characters), tags (8–12 relevant keyword strings), hashtags (3 relevant strings), scenes (3 to 5 items).
 Write an accurate, engaging title using the main topic keyword naturally; do not claim guaranteed ranking or use misleading clickbait.
 Description should summarize the actual video in two short paragraphs. Do not put hashtags in description: supply them separately.
 Tags must match the video, each max 40 characters, combined max 350 characters. Hashtags must have no spaces or punctuation other than an optional leading #; include #Shorts and two topic-specific hashtags. Do not invent live trend or search-volume claims.
-Each scene has narration (one short sentence, max 250 characters), search (simple English animated scene label, max 80 characters), visual_prompt (English shot description, max 600 characters).
+Each scene has narration (one character speech turn, no speaker label or stage direction, max 250 characters), search (short English scene label, max 80 characters), visual_prompt (English shot description, max 600 characters), speaker (mira or rafi), action (talk, wave, point, walk or celebrate), background (park, space or lab). Alternate speakers across scenes. Make dialogue conversational and tell one coherent story. Only use these supported backgrounds and actions; do not describe unsupported objects or actions as visible. No narrator, only dialogue. Include at least one walk scene and one wave, point or celebrate scene.
 Total narration 60–95 words, with an engaging first sentence and clear ending. No markdown.
-These are abstract educational animations, not footage of a real event. Do not claim they depict a specific actual event.'''
+These are original fictional 2D cartoons with preset characters and motions, not footage of a real event. Metadata must accurately describe the fictional story.'''
     # Accept a pasted model resource name, but call the API with one models/ prefix.
     model = os.environ['GEMINI_MODEL'].strip()
     if model.startswith('models/'):
@@ -242,7 +246,7 @@ def pipeline(job):
         save_setting('plan:' + job, json.dumps(plan, ensure_ascii=False, indent=2))
         video, credits = render(plan, folder)
         save_setting('credits:' + job, json.dumps(credits, indent=2))
-        description = plan['description'] + '\n\n' + ' '.join(plan['hashtags']) + '\n\nOriginal abstract animations. AI-assisted script and synthetic narration.'
+        description = plan['description'] + '\n\n' + ' '.join(plan['hashtags']) + '\n\nOriginal 2D cartoon animation. AI-assisted fictional story and synthetic character voices.'
         update(job, state='uploading')
         uploading = True
         upload = yt.videos().insert(part='snippet,status', notifySubscribers=False,

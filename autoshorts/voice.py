@@ -6,11 +6,11 @@ import time
 import requests
 
 
-def speak(text, destination):
+def speak(text, destination, voice_name=None):
     from .engine import gemini_error
     model = os.getenv('TTS_MODEL', 'gemini-3.8-flash-lite-tts').strip().removeprefix('models/')
     key = os.environ['GEMINI_API_KEY'].strip()
-    style = ('Natural, warm documentary narration; conversational, clear and engaging. '
+    style = ('Natural animated-story dialogue; warm, expressive, conversational and engaging. '
              'Use varied intonation and short pauses, moderate pace. Read the transcript exactly. '
              + ('Speak Bengali with a natural Bangladeshi accent.' if os.getenv('LANGUAGE') == 'bn' else 'Speak clear English.'))
     payload = {
@@ -18,7 +18,7 @@ def speak(text, destination):
         'input': [{'type': 'user_input', 'content': [{'type': 'text', 'text': text,
                    'annotations': [{'type': 'speech_metadata', 'style': style}]}]}],
         'response_format': {'type': 'audio'},
-        'generation_config': {'speech_config': [{'voice': os.getenv('TTS_VOICE', 'Kore').strip()}]},
+        'generation_config': {'speech_config': [{'voice': voice_name or os.getenv('TTS_VOICE', 'Kore').strip()}]},
     }
     # Bound each call and retry transient transport/server failures.
     # A timed-out generation may still finish remotely; retries can consume quota.
