@@ -1,0 +1,66 @@
+name: Auto Shorts
+on:
+  schedule:
+    # 14:17 UTC = 20:17 Bangladesh time. Avoids the busy top of the hour.
+    - cron: '17 14 * * *'
+  workflow_dispatch:
+    inputs:
+      privacy:
+        description: Upload visibility (test with private first)
+        type: choice
+        options: [private, unlisted, public]
+        default: private
+      reset_token:
+        description: Replace saved token using YOUTUBE_REFRESH_TOKEN secret
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: auto-shorts-publisher
+  cancel-in-progress: false
+jobs:
+  publish:
+    # Scheduled publishing is OFF until repository variable ENABLE_SCHEDULE is true.
+    if: github.event_name == 'workflow_dispatch' || vars.ENABLE_SCHEDULE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHONUNBUFFERED: '1'
+      DATA_DIR: /tmp/autoshorts
+      SECRET_KEY: ${{ secrets.SECRET_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+      MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+      MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+      MYSQL_USER: ${{ secrets.MYSQL_USER }}
+      MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+      MYSQL_DATABASE: ${{ vars.MYSQL_DATABASE || 'defaultdb' }}
+      MYSQL_SSL_CA: ${{ secrets.MYSQL_SSL_CA }}
+      NICHE: ${{ vars.NICHE || 'Nature and space facts for curious beginners' }}
+      LANGUAGE: ${{ vars.LANGUAGE || 'en' }}
+      UPLOAD_PRIVACY: ${{ inputs.privacy || vars.UPLOAD_PRIVACY || 'private' }}
+      MADE_FOR_KIDS: ${{ vars.MADE_FOR_KIDS || 'false' }}
+      CONTAINS_SYNTHETIC_MEDIA: ${{ vars.CONTAINS_SYNTHETIC_MEDIA || 'false' }}
+      RESET_YOUTUBE_TOKEN: ${{ inputs.reset_token || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install voice, fonts and encoder
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg espeak-ng fonts-noto-core
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Generate and publish one Short
+        run: python -m autoshorts.cli
+      - name: Delete all temporary media
+        if: always()
+        run: rm -rf /tmp/autoshorts
