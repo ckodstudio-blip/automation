@@ -9,7 +9,7 @@ on:
         description: Upload visibility (test with private first)
         type: choice
         options: [private, unlisted, public]
-        default: private
+        default: public
       reset_token:
         description: Replace saved token using YOUTUBE_REFRESH_TOKEN secret
         type: boolean
