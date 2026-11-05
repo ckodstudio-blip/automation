@@ -1,0 +1,15 @@
+Local validation, 2026-11-05:
+- Blender 4.2.3 LTS official Linux binary used for CPU render tests.
+- Six actual Cycles frames generated across park, space and lab, at two animation times per scene.
+- Character/background image output inspected; RGB frame differences confirmed.
+- Final camera framing also rendered separately.
+- A 60-second FFmpeg composition ran using synthetic test audio and repeated real Blender frames.
+  Duration, 720x1280 dimensions, 12fps and one whole-story voice invocation assertions passed.
+  This validates composition, not a full 720-frame Blender benchmark.
+- Python syntax and workflow YAML/preview defaults/scheduled publishing conditions checked.
+- The final 6-second preview (72 frames) and full one-minute 720-frame Blender render were not run to completion locally.
+  An initial preview run was stopped while adjusting rendering quality.
+- Final renderer defaults: 360x640 CPU Cycles, 8 samples with denoising, 12fps; FFmpeg upscales to 720x1280.
+- No live Gemini call, database connection or YouTube upload was performed.
+- GitHub workflow installs Blender from Ubuntu packages; local test version may differ.
+- Render speed/quality and quota availability must be checked with preview_only first on your runner.

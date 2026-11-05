@@ -167,7 +167,7 @@ Description should summarize the actual video in two short paragraphs. Do not pu
 Tags must match the video, each max 40 characters, combined max 350 characters. Hashtags must have no spaces or punctuation other than an optional leading #; include #Shorts and two topic-specific hashtags. Do not invent live trend or search-volume claims.
 Each scene has narration (one character speech turn, no speaker label or stage direction, max 360 characters), search (short English scene label, max 80 characters), visual_prompt (English shot description, max 600 characters), speaker (mira or rafi), action (talk, wave, point, walk or celebrate), background (park, space or lab). Alternate speakers across scenes. Make dialogue conversational and tell one coherent story. Only use these supported backgrounds and actions; do not describe unsupported objects or actions as visible. No narrator, only dialogue. Include at least one walk scene and one wave, point or celebrate scene.
 Total dialogue 110–140 words, aiming for 55–65 seconds at a natural conversational pace. Give each of the 5 scenes a complete speech turn of similar length. Use an engaging opening and a clear happy ending. Do not include timing directions in the spoken text. No markdown.
-These are original fictional 2D cartoons with preset characters and motions, not footage of a real event. Metadata must accurately describe the fictional story.'''
+These are original fictional low-poly 3D cartoons with preset characters and motions, not footage of a real event. Metadata must accurately describe the fictional story.'''
     # Accept a pasted model resource name, but call the API with one models/ prefix.
     model = os.environ['GEMINI_MODEL'].strip()
     if model.startswith('models/'):
@@ -246,7 +246,7 @@ def pipeline(job):
         save_setting('plan:' + job, json.dumps(plan, ensure_ascii=False, indent=2))
         video, credits = render(plan, folder)
         save_setting('credits:' + job, json.dumps(credits, indent=2))
-        description = plan['description'] + '\n\n' + ' '.join(plan['hashtags']) + '\n\nOriginal 2D cartoon animation. AI-assisted fictional story and synthetic character voices.'
+        description = plan['description'] + '\n\n' + ' '.join(plan['hashtags']) + '\n\nOriginal low-poly 3D cartoon animation. AI-assisted fictional story and synthetic character voices.'
         update(job, state='uploading')
         uploading = True
         upload = yt.videos().insert(part='snippet,status', notifySubscribers=False,

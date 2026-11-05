@@ -1,8 +1,8 @@
-"""One soundtrack, continuous cartoon render, silence-assisted scene timing."""
+"""One soundtrack, Blender low-poly 3D render, silence-assisted scene timing."""
 import json
 import math
 import os
-import subprocess
+
 
 
 def prepare_one_minute_audio(raw_audio, audio, folder):
@@ -29,7 +29,7 @@ def render_video(plan, folder):
     from .engine import run, duration, stamp
     from .voice import speak_story
     from .timing import analyze, scene_at
-    from .cartoon import frame as cartoon_frame
+    from .render3d import render_frames
     scenes = plan['scenes']
     raw_audio, audio = folder/'story-original.wav', folder/'story.wav'
     # Deliberately outside the frame/scene loops: one generation for all dialogue.
@@ -60,29 +60,13 @@ def render_video(plan, folder):
     family = 'Noto Sans Bengali' if os.getenv('LANGUAGE','en') == 'bn' else 'Noto Sans'
     vf = f"subtitles='{caption_path}':force_style='FontName={family},FontSize=11,Outline=1,Alignment=2,MarginV=32'"
     video = folder/'short.mp4'
-    command = ['ffmpeg','-y','-v','error','-f','rawvideo','-pix_fmt','rgb24','-s','720x1280',
-               '-r','25','-i','pipe:0','-i',str(audio),'-t',str(seconds),'-vf',vf,
-               '-map','0:v:0','-map','1:a:0','-c:v','libx264','-preset','veryfast','-crf','23',
-               '-pix_fmt','yuv420p','-threads','2','-c:a','aac','-ar','44100','-ac','2',
-               '-movflags','+faststart',str(video)]
-    log_path = folder/'cartoon-encoder.log'
-    with log_path.open('wb') as log:
-        process = subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=log)
-        try:
-            for frame in range(math.ceil(seconds*25)):
-                t=frame/25
-                index=scene_at(boundaries,t)
-                local=t-boundaries[index]
-                span=boundaries[index+1]-boundaries[index]
-                energy=levels[min(len(levels)-1,int(t/step))]
-                process.stdin.write(cartoon_frame(scenes[index],index,local,span,energy).tobytes())
-            process.stdin.close()
-            if process.wait(timeout=120) != 0:
-                raise RuntimeError('Cartoon encoding failed')
-        except BaseException:
-            process.kill()
-            process.wait()
-            raise
+    frames, count = render_frames(scenes,boundaries,levels,step,folder)
+    run(['ffmpeg','-y','-v','error','-framerate','12','-start_number','0',
+         '-i',str(frames/'%05d.png'),'-i',str(audio),'-t','60',
+         '-vf',f"scale=720:1280:flags=lanczos,{vf}",
+         '-map','0:v:0','-map','1:a:0','-c:v','libx264','-preset','veryfast','-crf','22',
+         '-pix_fmt','yuv420p','-threads','2','-c:a','aac','-ar','44100','-ac','2',
+         '-movflags','+faststart',str(video)], timeout=600)
     if abs(duration(video) - 60) > .15:
         raise RuntimeError('Rendered cartoon failed duration validation')
     return video
