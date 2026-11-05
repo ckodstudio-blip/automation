@@ -150,10 +150,30 @@ def build():
     return cast,groups,camera
 
 
+def render_still(scene):
+    """Ubuntu Blender can ship Cycles without the optional OIDN library."""
+    try:
+        bpy.ops.render.render(write_still=True)
+    except RuntimeError as exc:
+        message=str(exc).lower()
+        missing_oidn=('build without openimagedenoiser' in message or
+                      'build without openimagedenoise' in message)
+        if not missing_oidn or not scene.cycles.use_denoising:
+            raise
+        print('OpenImageDenoiser unavailable: rendering without denoising for this job.',flush=True)
+        scene.cycles.use_denoising=False
+        # A few more samples reduce noise when optional denoising is unavailable.
+        scene.cycles.samples=max(scene.cycles.samples,16)
+        for layer in scene.view_layers:
+            if hasattr(layer, 'cycles') and hasattr(layer.cycles, 'use_denoising'):
+                layer.cycles.use_denoising=False
+        bpy.ops.render.render(write_still=True)
+
+
 def render(config,frames_dir):
     cast,groups,camera=build();scene=bpy.context.scene
     scene.render.engine='CYCLES';scene.cycles.device='CPU';scene.cycles.samples=config.get('samples',8)
-    scene.cycles.use_denoising=True;scene.cycles.max_bounces=2;scene.cycles.diffuse_bounces=1
+    scene.cycles.use_denoising=config.get('denoise',True);scene.cycles.max_bounces=2;scene.cycles.diffuse_bounces=1
     scene.render.threads_mode='FIXED';scene.render.threads=2
     scene.render.use_persistent_data=True
     scene.render.resolution_x=config.get('width',360);scene.render.resolution_y=config.get('height',640)
@@ -181,7 +201,7 @@ def render(config,frames_dir):
         angle=math.sin(local*.25)*.08
         camera.location=(4.4+angle*8,-12,5.8+math.sin(local*.3)*.12);aim(camera,(0,0,1.75))
         scene.render.filepath=str(frames_dir/f'{frame:05d}.png')
-        bpy.ops.render.render(write_still=True)
+        render_still(scene)
         if frame%24==0:print(f'3D progress {frame+1}/{count}; elapsed {time.monotonic()-started:.1f}s',flush=True)
     print(f'3D render complete: {count} frames in {time.monotonic()-started:.1f}s',flush=True)
 
