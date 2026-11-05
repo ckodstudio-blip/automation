@@ -9,7 +9,11 @@ on:
         description: Upload visibility (test with private first)
         type: choice
         options: [private, unlisted, public]
-        default: public
+        default: private
+      preview_only:
+        description: Render a silent 6-second sample without calling APIs or uploading to YouTube
+        type: boolean
+        default: true
       reset_token:
         description: Replace saved token using YOUTUBE_REFRESH_TOKEN secret
         type: boolean
@@ -24,7 +28,7 @@ jobs:
     # Scheduled publishing is OFF until repository variable ENABLE_SCHEDULE is true.
     if: github.event_name == 'workflow_dispatch' || vars.ENABLE_SCHEDULE == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 180
     env:
       PYTHONUNBUFFERED: '1'
       DATA_DIR: /tmp/autoshorts
@@ -40,26 +44,42 @@ jobs:
       MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
       MYSQL_DATABASE: ${{ vars.MYSQL_DATABASE || 'defaultdb' }}
       MYSQL_SSL_CA: ${{ secrets.MYSQL_SSL_CA }}
-      NICHE: ${{ vars.NICHE || 'Nature and space facts for curious beginners' }}
-      LANGUAGE: ${{ vars.LANGUAGE || 'en' }}
+      NICHE: ${{ vars.NICHE || 'Short cheerful fictional cartoon adventures for children aged 4–8, teaching kindness and sharing with a happy ending' }}
+      LANGUAGE: ${{ vars.LANGUAGE || 'bn' }}
       UPLOAD_PRIVACY: ${{ inputs.privacy || vars.UPLOAD_PRIVACY || 'private' }}
-      MADE_FOR_KIDS: ${{ vars.MADE_FOR_KIDS || 'false' }}
+      MADE_FOR_KIDS: ${{ vars.MADE_FOR_KIDS || 'true' }}
       CONTAINS_SYNTHETIC_MEDIA: ${{ vars.CONTAINS_SYNTHETIC_MEDIA || 'false' }}
+      TTS_MODEL: ${{ vars.TTS_MODEL || 'gemini-3.8-flash-lite-tts' }}
+      TTS_VOICE: ${{ vars.TTS_VOICE || 'Kore' }}
+      TTS_SECOND_VOICE: ${{ vars.TTS_SECOND_VOICE || 'Puck' }}
+      TTS_MAX_ATTEMPTS: '1'
       RESET_YOUTUBE_TOKEN: ${{ inputs.reset_token || 'false' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - name: Install voice, fonts and encoder
+      - name: Install Blender, fonts and encoder
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ffmpeg espeak-ng fonts-noto-core
+          sudo apt-get install -y --no-install-recommends blender ffmpeg fonts-noto-core
       - name: Install Python dependencies
         run: python -m pip install -r requirements.txt
+      - name: Render sample without API calls
+        if: github.event_name == 'workflow_dispatch' && inputs.preview_only
+        run: python scripts/preview_3d.py
+      - name: Downloadable preview
+        if: github.event_name == 'workflow_dispatch' && inputs.preview_only
+        uses: actions/upload-artifact@v4
+        with:
+          name: cartoon-3d-preview
+          path: /tmp/autoshorts/preview.mp4
+          retention-days: 3
+          if-no-files-found: error
       - name: Generate and publish one Short
+        if: github.event_name != 'workflow_dispatch' || !inputs.preview_only
         run: python -m autoshorts.cli
       - name: Delete all temporary media
         if: always()
