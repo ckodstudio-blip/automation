@@ -1,102 +1,88 @@
-"""Frame-rendered moving graphics with natural speech and approximate captions."""
+"""One soundtrack, continuous cartoon render, silence-assisted scene timing."""
+import json
 import math
 import os
-from pathlib import Path
 import subprocess
-from PIL import Image, ImageDraw, ImageFont
 
 
-def font(size):
-    candidates = ['/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf',
-                  '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf']
-    for path in candidates:
-        if Path(path).exists():
-            return ImageFont.truetype(path, size)
-    return ImageFont.load_default()
-
-
-def wrap(draw, text, f, width):
-    lines, current = [], ''
-    for word in text.split():
-        candidate = (current + ' ' + word).strip()
-        if draw.textbbox((0, 0), candidate, font=f)[2] > width and current:
-            lines.append(current)
-            current = word
-        else:
-            current = candidate
-    if current:
-        lines.append(current)
-    return lines
-
-
-def audio_energy(path):
-    """RMS by video frame; mouth closes during silence. Input is normalized PCM16."""
-    import array
-    import sys
-    import wave
-    with wave.open(str(path), 'rb') as wav:
-        rate = wav.getframerate()
-        values = array.array('h', wav.readframes(wav.getnframes()))
-        if sys.byteorder != 'little':
-            values.byteswap()
-    size = rate // 25
-    levels = [math.sqrt(sum(v*v for v in values[n:n+size]) / max(1,len(values[n:n+size])))
-              for n in range(0,len(values),size)]
-    peak = max(levels, default=0)
-    return [min(1, v / max(peak*.65, 150)) if v>100 else 0 for v in levels]
+def prepare_one_minute_audio(raw_audio, audio, folder):
+    """Fit narration near a minute without changing pitch or cutting speech."""
+    from .engine import run, duration
+    source_seconds = duration(raw_audio)
+    if not 50 <= source_seconds <= 70:
+        raise RuntimeError(
+            f'Voice length was {source_seconds:.1f}s; expected 50–70s for a one-minute story. '
+            'Stopped before upload rather than cutting dialogue or adding a long silent section.')
+    # Aim just below 60 seconds to leave room for tempo-filter rounding/tail.
+    tempo = source_seconds / 59.5
+    paced = folder/'story-paced.wav'
+    run(['ffmpeg','-y','-v','error','-i',str(raw_audio),'-af',f'atempo={tempo:.8f}',
+         '-ac','1','-ar','24000','-c:a','pcm_s16le',str(paced)])
+    paced_seconds = duration(paced)
+    if not 58.5 <= paced_seconds <= 60:
+        raise RuntimeError('Voice tempo adjustment exceeded the one-minute budget; stopped before upload.')
+    run(['ffmpeg','-y','-v','error','-i',str(paced),'-af','apad=whole_dur=60,atrim=duration=60',
+         '-ac','1','-ar','24000','-c:a','pcm_s16le',str(audio)])
 
 
 def render_video(plan, folder):
     from .engine import run, duration, stamp
-    language = os.getenv('LANGUAGE', 'en')
-    from .voice import speak
-    parts, elapsed = [], 0
-    for i, scene in enumerate(plan['scenes']):
-        text, audio, image, caption, out = [folder / f'scene-{i}.{suffix}' for suffix in ('txt','wav','png','srt','mp4')]
-        text.write_text(scene['narration'], encoding='utf-8')
-        voice_name = os.getenv('TTS_SECOND_VOICE', 'Puck') if scene['speaker'] == 'rafi' else os.getenv('TTS_VOICE', 'Kore')
-        speak(scene['narration'], audio, voice_name=voice_name)
-        normalized = folder / f'voice-{i}.wav'
-        run(['ffmpeg','-y','-v','error','-i',str(audio),'-ac','1','-ar','24000','-c:a','pcm_s16le',str(normalized)])
-        audio = normalized
-        levels = audio_energy(audio)
-        seconds = duration(audio) + 0.4
-        elapsed += seconds
-        if elapsed > 70:
-            raise RuntimeError('Narration exceeds 70-second limit. Job stopped before upload.')
+    from .voice import speak_story
+    from .timing import analyze, scene_at
+    from .cartoon import frame as cartoon_frame
+    scenes = plan['scenes']
+    raw_audio, audio = folder/'story-original.wav', folder/'story.wav'
+    # Deliberately outside the frame/scene loops: one generation for all dialogue.
+    speak_story(scenes, raw_audio)
+    prepare_one_minute_audio(raw_audio, audio, folder)
+    boundaries, levels, step = analyze(audio, scenes)
+    seconds = boundaries[-1]
+    (folder/'scene-timing.json').write_text(json.dumps({
+        'method': 'silence-assisted approximate scene timing',
+        'boundaries_seconds': boundaries,
+        'note': 'Full audio is preserved; scene/subtitle timing is not exact speech alignment.'
+    }, indent=2),encoding='utf-8')
+    captions, number = [], 0
+    for index, scene in enumerate(scenes):
+        start,end = boundaries[index:index+2]
         words = scene['narration'].split()
         chunks = [' '.join(words[j:j+5]) for j in range(0,len(words),5)]
         if not chunks:
             raise ValueError('Empty narration')
-        caption.write_text('\n\n'.join(f'{j+1}\n{stamp(j*seconds/len(chunks))} --> {stamp((j+1)*seconds/len(chunks))}\n{t}' for j,t in enumerate(chunks)), encoding='utf-8')
-        # Names/paths come from application-owned temporary directories, not user input.
-        caption_path = str(caption.resolve()).replace('\\', '/').replace(':', '\\:').replace("'", "\\'")
-        family = 'Noto Sans Bengali' if language == 'bn' else 'Noto Sans'
-        vf = f"subtitles='{caption_path}':force_style='FontName={family},FontSize=11,Outline=1,Alignment=2,MarginV=32'"
-        command = ['ffmpeg','-y','-v','error','-f','rawvideo','-pix_fmt','rgb24','-s','720x1280',
-                   '-r','25','-i','pipe:0','-i',str(audio),'-t',str(seconds),'-vf',vf,
-                   '-af','apad','-map','0:v:0','-map','1:a:0','-c:v','libx264',
-                   '-preset','veryfast','-crf','23','-pix_fmt','yuv420p','-threads','2',
-                   '-c:a','aac','-ar','44100','-ac','2',str(out)]
-        with (folder / f'encoder-{i}.log').open('wb') as log:
-            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log)
-            try:
-                from .cartoon import frame as cartoon_frame
-                for frame in range(math.ceil(seconds * 25)):
-                    level = levels[frame] if frame < len(levels) else 0
-                    process.stdin.write(cartoon_frame(scene, i, frame / 25, seconds, level).tobytes())
-                process.stdin.close()
-                if process.wait(timeout=120) != 0:
-                    raise RuntimeError('Cartoon encoder failed; check encoder logs.')
-            except BaseException:
-                process.kill()
-                process.wait()
-                raise
-        parts.append(out)
-    concat = folder / 'concat.txt'
-    concat.write_text('\n'.join(f"file '{p.resolve()}'" for p in parts))
-    video = folder / 'short.mp4'
-    run(['ffmpeg','-y','-v','error','-f','concat','-safe','0','-i',str(concat),'-c','copy','-movflags','+faststart',str(video)])
-    if not 1 < duration(video) <= 71:
-        raise RuntimeError('Rendered video failed duration validation')
+        for j,text in enumerate(chunks):
+            number += 1
+            a=start+(end-start)*j/len(chunks)
+            b=start+(end-start)*(j+1)/len(chunks)
+            captions.append(f'{number}\n{stamp(a)} --> {stamp(b)}\n{text}')
+    caption = folder/'story.srt'
+    caption.write_text('\n\n'.join(captions),encoding='utf-8')
+    caption_path = str(caption.resolve()).replace('\\','/').replace(':','\\:').replace("'", "\\'")
+    family = 'Noto Sans Bengali' if os.getenv('LANGUAGE','en') == 'bn' else 'Noto Sans'
+    vf = f"subtitles='{caption_path}':force_style='FontName={family},FontSize=11,Outline=1,Alignment=2,MarginV=32'"
+    video = folder/'short.mp4'
+    command = ['ffmpeg','-y','-v','error','-f','rawvideo','-pix_fmt','rgb24','-s','720x1280',
+               '-r','25','-i','pipe:0','-i',str(audio),'-t',str(seconds),'-vf',vf,
+               '-map','0:v:0','-map','1:a:0','-c:v','libx264','-preset','veryfast','-crf','23',
+               '-pix_fmt','yuv420p','-threads','2','-c:a','aac','-ar','44100','-ac','2',
+               '-movflags','+faststart',str(video)]
+    log_path = folder/'cartoon-encoder.log'
+    with log_path.open('wb') as log:
+        process = subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=log)
+        try:
+            for frame in range(math.ceil(seconds*25)):
+                t=frame/25
+                index=scene_at(boundaries,t)
+                local=t-boundaries[index]
+                span=boundaries[index+1]-boundaries[index]
+                energy=levels[min(len(levels)-1,int(t/step))]
+                process.stdin.write(cartoon_frame(scenes[index],index,local,span,energy).tobytes())
+            process.stdin.close()
+            if process.wait(timeout=120) != 0:
+                raise RuntimeError('Cartoon encoding failed')
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+    if abs(duration(video) - 60) > .15:
+        raise RuntimeError('Rendered cartoon failed duration validation')
     return video
